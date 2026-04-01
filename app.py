@@ -13,6 +13,7 @@ from git import Repo
 import firebase_admin
 from firebase_admin import credentials, firestore
 import json
+from config import Config
 import socket
 import sys
 load_dotenv()
@@ -41,8 +42,18 @@ app.secret_key = 'your-secret-key-here-please-change-in-production'
 
 # Enable CORS for all routes
 # Enable CORS for all routes with specific origins
-CORS(app, origins=['http://localhost:3000', 'http://127.0.0.1:3000', 'https://your-frontend.railway.app'], allow_headers=['Content-Type'])
+from flask_cors import CORS
 
+# Allow multiple origins including your local development server
+CORS(app, origins=[
+    'http://localhost:5500',
+    'http://127.0.0.1:5500',
+    'http://localhost:3000',
+    'http://127.0.0.1:3000',
+    'http://localhost:8000',
+    'http://127.0.0.1:8000',
+    'https://analyzec1-production.up.railway.app'
+], supports_credentials=True, allow_headers=['Content-Type', 'Authorization'])
 # Collections
 classrooms_ref = db.collection('Classrooms')
 professors_ref = db.collection('professors')

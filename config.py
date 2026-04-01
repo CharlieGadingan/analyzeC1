@@ -1,9 +1,14 @@
 import os
 
 class Config:
-    MONGO_URI = os.getenv('MONGO_URI', 'mongodb://localhost:27017/')
-    MONGO_DB = os.getenv('MONGO_DB', 'codetracker')
-    GITHUB_TOKEN = os.getenv('GITHUB_TOKEN', '')  # Optional: for private repos
-    MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
-    ALLOWED_EXTENSIONS = {'.c', '.cpp', '.cc', '.cxx'}
-    COMPILE_TIMEOUT = 30  # seconds
+    # GitHub Configuration
+    GITHUB_TOKEN = os.getenv('GITHUB_TOKEN', '')
+    
+    # Firebase Configuration
+    FIREBASE_CREDENTIALS = os.getenv('FIREBASE_SERVICE_ACCOUNT', '')
+    
+    # App Configuration
+    SECRET_KEY = os.getenv('SECRET_KEY', 'your-secret-key-here')
+    
+    # Other settings
+    DEBUG = os.getenv('DEBUG', 'False').lower() == 'true'
