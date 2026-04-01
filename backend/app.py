@@ -3,6 +3,7 @@ from flask import Flask, request, jsonify, session
 from flask_cors import CORS
 from datetime import datetime
 import os
+from dotenv import load_dotenv
 import tempfile
 import shutil
 import subprocess
@@ -14,23 +15,33 @@ from firebase_admin import credentials, firestore
 import json
 import socket
 import sys
-
+load_dotenv()
 # Initialize Firebase Admin SDK
 try:
-    cred = credentials.Certificate("serviceAccountKey.json")
+    # Check if running on Railway with environment variable
+    if os.getenv('FIREBASE_SERVICE_ACCOUNT'):
+        import json
+        service_account_info = json.loads(os.getenv('FIREBASE_SERVICE_ACCOUNT'))
+        cred = credentials.Certificate(service_account_info)
+    else:
+        # Local development
+        cred = credentials.Certificate("serviceAccountKey.json")
+    
     firebase_admin.initialize_app(cred)
     db = firestore.client()
     print("✅ Firebase initialized successfully")
 except Exception as e:
     print(f"❌ Firebase initialization failed: {e}")
-    print("Make sure serviceAccountKey.json exists in the current directory")
-    sys.exit(1)
+    if not os.getenv('RAILWAY_ENVIRONMENT'):
+        print("Make sure serviceAccountKey.json exists in the current directory")
+        sys.exit(1)
 
 app = Flask(__name__)
 app.secret_key = 'your-secret-key-here-please-change-in-production'
 
 # Enable CORS for all routes
-CORS(app, origins='*')
+# Enable CORS for all routes with specific origins
+CORS(app, origins=['http://localhost:3000', 'http://127.0.0.1:3000', 'https://your-frontend.railway.app'], allow_headers=['Content-Type'])
 
 # Collections
 classrooms_ref = db.collection('Classrooms')
@@ -868,40 +879,46 @@ def find_free_port():
         return s.getsockname()[1]
 
 if __name__ == '__main__':
-    # Try common ports first
-    ports_to_try = [5000, 5001, 8080, 3000, 8000, 8888]
-    selected_port = None
+    # Get port from environment variable (Railway sets this)
+    port = int(os.getenv('PORT', 5000))
     
-    print("🔍 Checking available ports...")
-    for port in ports_to_try:
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.bind(('127.0.0.1', port))
-                selected_port = port
-                print(f"   ✓ Port {port} is available")
-                break
-        except OSError:
-            print(f"   ✗ Port {port} is in use")
-            continue
-    
-    if selected_port is None:
-        selected_port = find_free_port()
-        print(f"   ℹ️ Using automatically assigned port: {selected_port}")
-    
-    print("=" * 60)
-    print("🚀 CodeTracker Backend Server (Firebase)")
-    print("=" * 60)
-    print(f"📡 Database: Firebase Firestore")
-    print(f"🌐 Server running on: http://127.0.0.1:{selected_port}")
-    print("=" * 60)
-    print(f"📋 Test endpoints:")
-    print(f"   Health: http://127.0.0.1:{selected_port}/api/health")
-    print(f"   Classroom: http://127.0.0.1:{selected_port}/api/classroom/CLASS101")
-    print(f"   Students: http://127.0.0.1:{selected_port}/api/students/prof_icabasug")
-    print(f"   Activities for STU001: http://127.0.0.1:{selected_port}/api/activities/STU001")
-    print("=" * 60)
-    print(f"⚠️  IMPORTANT: Update Syntax.html with this port:")
-    print(f"   const API_BASE_URL = 'http://127.0.0.1:{selected_port}';")
-    print("=" * 60)
-    
-    app.run(debug=True, port=selected_port, host='127.0.0.1')
+    # For local development
+    if not os.getenv('RAILWAY_ENVIRONMENT'):
+        # Find available port for local development
+        ports_to_try = [5000, 5001, 8080, 3000, 8000, 8888]
+        selected_port = None
+        
+        print("🔍 Checking available ports...")
+        for test_port in ports_to_try:
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.bind(('127.0.0.1', test_port))
+                    selected_port = test_port
+                    print(f"   ✓ Port {test_port} is available")
+                    break
+            except OSError:
+                print(f"   ✗ Port {test_port} is in use")
+                continue
+        
+        if selected_port is None:
+            selected_port = find_free_port()
+            print(f"   ℹ️ Using automatically assigned port: {selected_port}")
+        
+        print("=" * 60)
+        print("🚀 CodeTracker Backend Server (Firebase)")
+        print("=" * 60)
+        print(f"📡 Database: Firebase Firestore")
+        print(f"🌐 Server running on: http://127.0.0.1:{selected_port}")
+        print("=" * 60)
+        
+        app.run(debug=True, port=selected_port, host='127.0.0.1')
+    else:
+        # Production on Railway
+        print("=" * 60)
+        print("🚀 CodeTracker Backend Server (Production)")
+        print("=" * 60)
+        print(f"📡 Database: Firebase Firestore")
+        print(f"🌐 Server running on port: {port}")
+        print("=" * 60)
+        
+        app.run(debug=False, port=port, host='0.0.0.0')
