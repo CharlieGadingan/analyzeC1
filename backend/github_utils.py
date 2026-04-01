@@ -15,21 +15,31 @@ class GitHubUtils:
         """Download repository and return path to temp directory"""
         temp_dir = tempfile.mkdtemp()
         
-        try:
-            # Clone the repository
-            if Config.GITHUB_TOKEN:
-                # For private repos
-                auth_url = repo_url.replace('https://', f'https://{Config.GITHUB_TOKEN}@')
-                Repo.clone_from(auth_url, temp_dir, branch=branch, depth=1)
-            else:
-                # For public repos
-                Repo.clone_from(repo_url, temp_dir, branch=branch, depth=1)
-            
-            return temp_dir
-        except Exception as e:
+        branches_to_try = [branch, 'master', 'main']
+        
+        last_error = None
+        for try_branch in branches_to_try:
+            try:
+                if Config.GITHUB_TOKEN:
+                    auth_url = repo_url.replace('https://', f'https://{Config.GITHUB_TOKEN}@')
+                    Repo.clone_from(auth_url, temp_dir, branch=try_branch, depth=1)
+                else:
+                    Repo.clone_from(repo_url, temp_dir, branch=try_branch, depth=1)
+                print(f"✅ Successfully cloned {repo_url} using branch: {try_branch}")
+                return temp_dir
+            except Exception as e:
+                last_error = e
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                temp_dir = tempfile.mkdtemp()
+                continue
+            # If we get here, all branches failed
             shutil.rmtree(temp_dir, ignore_errors=True)
-            raise Exception(f"Failed to clone repository: {str(e)}")
-
+            raise Exception(f"Failed to clone repository {repo_url}. Tried branches: {branches_to_try}. Last error: {str(last_error)}")
+    
+    
+    
+    
+    
     @staticmethod
     def download_repository_zip(repo_url, branch='main'):
         """Alternative: Download as ZIP (faster for large repos)"""
@@ -68,7 +78,31 @@ class GitHubUtils:
                 os.rmdir(subdir)
         
         return temp_dir
+    
+    
+    @staticmethod
+    def get_default_branch(repo_url):
+        """Get the default branch name from GitHub API"""
+        parts = repo_url.rstrip('/').split('/')
+        if len(parts) >= 5:
+            user = parts[-2]
+            repo = parts[-1]
 
+            api_url = f"https://api.github.com/repos/{user}/{repo}"
+            headers = {}
+            if Config.GITHUB_TOKEN:
+                headers['Authorization'] = f'token {Config.GITHUB_TOKEN}'
+
+            try:
+                response = requests.get(api_url, headers=headers)
+                if response.status_code == 200:
+                    repo_info = response.json()
+                    return repo_info.get('default_branch', 'main')
+            except:
+                pass
+
+        return 'main'  # Default fallback
+    
     @staticmethod
     def cleanup_temp_dir(temp_dir):
         """Remove temporary directory"""

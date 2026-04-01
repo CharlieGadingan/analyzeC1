@@ -133,8 +133,8 @@ def setup_database():
             "due_date": "March 10, 2026",
             "difficulty": "Medium",
             "language": "C",
-            "repo_url": "https://github.com/CharlieGadingan/clanguage.git",
-            "branch": "main",
+            "repo_url": "https://github.com/hubojing/C-Language-Games.git",
+            "branch": "master",
             "StudentID": "STU002",
             "classroomID": "CLASS101",
             "created_at": firestore.SERVER_TIMESTAMP

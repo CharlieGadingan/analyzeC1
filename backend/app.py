@@ -359,6 +359,42 @@ def submit_repository():
         
         activity = activity_doc.to_dict()
         
+        # Try to detect the correct branch before storing
+        detected_branch = branch
+        try:
+            # Quick check if the branch exists
+            import requests
+            parts = repo_url.rstrip('/').split('/')
+            if len(parts) >= 5:
+                user = parts[-2]
+                repo_name = parts[-1]
+                
+                # Try main branch first
+                api_url = f"https://api.github.com/repos/{user}/{repo_name}/branches"
+                headers = {}
+                if Config.GITHUB_TOKEN:
+                    headers['Authorization'] = f'token {Config.GITHUB_TOKEN}'
+                
+                response = requests.get(api_url, headers=headers)
+                if response.status_code == 200:
+                    branches = response.json()
+                    branch_names = [b['name'] for b in branches]
+                    
+                    if branch in branch_names:
+                        detected_branch = branch
+                    elif 'master' in branch_names:
+                        detected_branch = 'master'
+                    elif 'main' in branch_names:
+                        detected_branch = 'main'
+                    elif branch_names:
+                        detected_branch = branch_names[0]
+                    
+                    if detected_branch != branch:
+                        print(f"⚠️ Detected branch changed from {branch} to {detected_branch}")
+        except Exception as e:
+            print(f"⚠️ Could not detect branch: {e}")
+            # Continue with original branch
+        
         submit_id = f"{student_id}_{activity_id}"
         
         # Check if submission exists in profSubmit
@@ -371,7 +407,7 @@ def submit_repository():
             for doc in analysis_snapshot:
                 doc.reference.delete()
             
-            # Reset submission
+            # Reset submission with detected branch
             prof_submit_ref.document(submit_id).set({
                 'StudentID': student_id,
                 'ActivityID': activity_id,
@@ -379,7 +415,8 @@ def submit_repository():
                 'classroomID': activity.get('classroomID', student_data.get('classroomID', 'CLASS101')),
                 'professorID': professor_id,
                 'repo_url': repo_url,
-                'branch': branch,
+                'branch': detected_branch,  # Use detected branch
+                'original_branch': branch,   # Store original for reference
                 'status': 'pending',
                 'completed_at': None,
                 'total_files': 0,
@@ -397,7 +434,8 @@ def submit_repository():
                 'classroomID': activity.get('classroomID', student_data.get('classroomID', 'CLASS101')),
                 'professorID': professor_id,
                 'repo_url': repo_url,
-                'branch': branch,
+                'branch': detected_branch,  # Use detected branch
+                'original_branch': branch,   # Store original for reference
                 'status': 'pending',
                 'created_at': firestore.SERVER_TIMESTAMP,
                 'completed_at': None,
@@ -409,10 +447,10 @@ def submit_repository():
             prof_submit_ref.document(submit_id).set(submission_data)
             print(f"📝 Created new submission: {submit_id}")
         
-        # Start analysis in background
+        # Start analysis in background with detected branch
         thread = threading.Thread(
             target=analyze_repository_background,
-            args=(submit_id, repo_url, branch, student_id, professor_id)
+            args=(submit_id, repo_url, detected_branch, student_id, professor_id)
         )
         thread.daemon = True
         thread.start()
@@ -420,13 +458,14 @@ def submit_repository():
         return jsonify({
             'success': True,
             'submit_id': submit_id,
-            'status': 'pending'
+            'status': 'pending',
+            'branch_used': detected_branch
         })
         
     except Exception as e:
         print(f"❌ Error: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
-
+    
 @app.route('/api/save-grade', methods=['POST'])
 def save_grade():
     """Save grade for a submission"""
@@ -584,13 +623,43 @@ def analyze_repository_background(submit_id, repo_url, branch, student_id, profe
     temp_dir = None
     try:
         temp_dir = tempfile.mkdtemp()
-        print(f"📦 Cloning from {repo_url} to {temp_dir}")
+        print(f"📦 Attempting to clone from {repo_url} to {temp_dir}")
         
-        repo = Repo.clone_from(repo_url, temp_dir, branch=branch, depth=1)
+        # Try multiple branches if the specified branch fails
+        branches_to_try = [branch, 'main', 'master']
+        cloned_successfully = False
+        repo = None
+        used_branch = None
+        
+        for try_branch in branches_to_try:
+            try:
+                print(f"   Trying branch: {try_branch}")
+                repo = Repo.clone_from(repo_url, temp_dir, branch=try_branch, depth=1)
+                used_branch = try_branch
+                cloned_successfully = True
+                print(f"   ✅ Successfully cloned using branch: {try_branch}")
+                break
+            except Exception as clone_error:
+                print(f"   ❌ Failed with branch {try_branch}: {clone_error}")
+                # Clean up temp directory for next attempt
+                if temp_dir and os.path.exists(temp_dir):
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+                    temp_dir = tempfile.mkdtemp()
+                continue
+        
+        if not cloned_successfully:
+            raise Exception(f"Failed to clone repository. Tried branches: {branches_to_try}")
         
         latest_commit = repo.head.commit
         print(f"   📍 Latest commit: {latest_commit.hexsha[:8]} - {latest_commit.message.strip()}")
         
+        # Update submission with the actual branch used
+        prof_submit_ref.document(submit_id).update({
+            'branch_used': used_branch,  # Store which branch was actually used
+            'last_commit': latest_commit.hexsha,
+            'last_commit_message': latest_commit.message.strip(),
+            'last_commit_date': datetime.fromtimestamp(latest_commit.committed_date)
+        })
         # Find ALL files
         all_files = []
         
