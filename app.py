@@ -1,5 +1,5 @@
-# app.py - Complete Version with Classroom Support
-from flask import Flask, request, jsonify, session
+# app.py - Standalone Code Analyzer Backend (No Firebase)
+from flask import Flask, request, jsonify
 from flask_cors import CORS
 from datetime import datetime
 import os
@@ -9,42 +9,18 @@ import shutil
 import subprocess
 import threading
 import re
+import uuid
 from git import Repo
-import firebase_admin
-from firebase_admin import credentials, firestore
-import json
-from config import Config
 import socket
 import sys
+import requests
+
 load_dotenv()
-# Initialize Firebase Admin SDK
-try:
-    # Check if running on Railway with environment variable
-    if os.getenv('FIREBASE_SERVICE_ACCOUNT'):
-        import json
-        service_account_info = json.loads(os.getenv('FIREBASE_SERVICE_ACCOUNT'))
-        cred = credentials.Certificate(service_account_info)
-    else:
-        # Local development
-        cred = credentials.Certificate("serviceAccountKey.json")
-    
-    firebase_admin.initialize_app(cred)
-    db = firestore.client()
-    print("✅ Firebase initialized successfully")
-except Exception as e:
-    print(f"❌ Firebase initialization failed: {e}")
-    if not os.getenv('RAILWAY_ENVIRONMENT'):
-        print("Make sure serviceAccountKey.json exists in the current directory")
-        sys.exit(1)
 
 app = Flask(__name__)
-app.secret_key = 'your-secret-key-here-please-change-in-production'
+app.secret_key = os.getenv('SECRET_KEY', 'code-analyzer-secret-key')
 
 # Enable CORS for all routes
-# Enable CORS for all routes with specific origins
-from flask_cors import CORS
-
-# Allow multiple origins including your local development server
 CORS(app, origins=[
     'http://localhost:5500',
     'http://127.0.0.1:5500',
@@ -52,19 +28,15 @@ CORS(app, origins=[
     'http://127.0.0.1:3000',
     'http://localhost:8000',
     'http://127.0.0.1:8000',
-    'https://analyzec1-production.up.railway.app'
+    'https://analyzec1-production.up.railway.app',
+    'https://your-frontend-domain.vercel.app'
 ], supports_credentials=True, allow_headers=['Content-Type', 'Authorization'])
-# Collections
-classrooms_ref = db.collection('Classrooms')
-professors_ref = db.collection('professors')
-students_ref = db.collection('Students')
-activitys_ref = db.collection('Activitys')
-prof_submit_ref = db.collection('profSubmit')
-reviews_ref = db.collection('reviews')
-analysis_results_ref = db.collection('Analysis_results')
+
+# In-memory storage for analysis results (since no Firebase)
+analysis_storage = {}
 
 def clean_error_message(error_line):
-    """Extract error message"""
+    """Extract error message from compiler output"""
     import re
     
     # Try to extract the main error with line number
@@ -113,8 +85,8 @@ def clean_error_message(error_line):
     
     return None
 
-def analyze_file(file_path, language, file_content):
-    """Analyze a single file"""
+def analyze_file(file_path, language):
+    """Analyze a single C/C++ file"""
     errors = []
     warnings = []
     
@@ -173,484 +145,41 @@ def analyze_file(file_path, language, file_content):
     
     return errors, warnings
 
-@app.route('/api/classroom/<classroom_id>', methods=['GET'])
-def get_classroom_info(classroom_id):
-    """Get classroom information"""
+def detect_branch(repo_url):
+    """Detect the default branch of a GitHub repository"""
     try:
-        classroom_doc = classrooms_ref.document(classroom_id).get()
-        if not classroom_doc.exists:
-            return jsonify({'success': False, 'error': 'Classroom not found'}), 404
-        
-        classroom = classroom_doc.to_dict()
-        classroom['classroomID'] = classroom_id
-        
-        return jsonify({'success': True, 'classroom': classroom})
-        
-    except Exception as e:
-        print(f"❌ Error: {e}")
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-@app.route('/api/students/<professor_id>', methods=['GET'])
-def get_students_by_professor(professor_id):
-    """Get all students for a professor"""
-    try:
-        print(f"📡 Fetching students for professor: {professor_id}")
-        
-        # Check if professor exists
-        professor_doc = professors_ref.document(professor_id).get()
-        if not professor_doc.exists:
-            print(f"❌ Professor not found: {professor_id}")
-            return jsonify({
-                'success': False, 
-                'error': f'Professor with ID {professor_id} not found'
-            }), 404
-        
-        # Get all students with this professor ID
-        students = []
-        students_snapshot = students_ref.where('professorID', '==', professor_id).stream()
-        
-        for doc in students_snapshot:
-            student = doc.to_dict()
-            student['StudentID'] = doc.id
-            students.append(student)
-        
-        print(f"✅ Found {len(students)} students for professor {professor_id}")
-        
-        return jsonify({
-            'success': True,
-            'students': students
-        })
-        
-    except Exception as e:
-        print(f"❌ Error in get_students_by_professor: {e}")
-        import traceback
-        traceback.print_exc()
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-@app.route('/api/activities/<student_id>', methods=['GET'])
-def get_student_activities(student_id):
-    """Get all activities for a student with classroom info"""
-    try:
-        print(f"📡 Fetching activities for student: {student_id}")
-        
-        # Check if student exists
-        student_doc = students_ref.document(student_id).get()
-        if not student_doc.exists:
-            print(f"❌ Student not found: {student_id}")
-            return jsonify({
-                'success': False, 
-                'error': f'Student with ID {student_id} not found'
-            }), 404
-        
-        student_data = student_doc.to_dict()
-        classroom_id = student_data.get('classroomID', 'CLASS101')
-        
-        # Get classroom info
-        classroom_doc = classrooms_ref.document(classroom_id).get()
-        classroom_info = classroom_doc.to_dict() if classroom_doc.exists else {}
-        
-        print(f"✅ Found student: {student_data.get('name')} - Classroom: {classroom_id}")
-        
-        # Get all activities for this student
-        activities = []
-        activities_snapshot = activitys_ref.where('StudentID', '==', student_id).stream()
-        
-        activities_list = list(activities_snapshot)
-        print(f"📚 Found {len(activities_list)} activities for student {student_id}")
-        
-        for doc in activities_list:
-            activity = doc.to_dict()
-            activity['ActivityID'] = activity.get('ActivityID', doc.id)
+        parts = repo_url.rstrip('/').split('/')
+        if len(parts) >= 5:
+            user = parts[-2]
+            repo_name = parts[-1].replace('.git', '')
             
-            # Get submission for this activity
-            submit_id = f"{student_id}_{activity['ActivityID']}"
-            submit_doc = prof_submit_ref.document(submit_id).get()
+            api_url = f"https://api.github.com/repos/{user}/{repo_name}"
+            headers = {}
+            if os.getenv('GITHUB_TOKEN'):
+                headers['Authorization'] = f"token {os.getenv('GITHUB_TOKEN')}"
             
-            activity_data = {
-                "activity_id": activity["ActivityID"],
-                "title": activity["ActivityTitle"],
-                "description": activity.get("description", ""),
-                "due_date": activity["due_date"],
-                "difficulty": activity["difficulty"],
-                "language": activity["language"],
-                "repo_url": activity["repo_url"],
-                "branch": activity.get("branch", "main"),
-                "classroomID": activity.get("classroomID", classroom_id),
-                "classroomName": classroom_info.get('name', 'Programming Fundamentals'),
-                "status": "pending",
-                "grade": None,
-                "feedback": None,
-                "submit_id": None,
-                "errors_count": 0,
-                "warnings_count": 0,
-                "total_files": 0
-            }
-            
-            if submit_doc.exists:
-                submission = submit_doc.to_dict()
-                activity_data["submit_id"] = submit_id
-                activity_data["status"] = submission.get("status", "pending")
-                
-                # Get review
-                review_doc = reviews_ref.document(submit_id).get()
-                if review_doc.exists:
-                    review = review_doc.to_dict()
-                    activity_data["grade"] = review.get("grade")
-                    activity_data["feedback"] = review.get("feedback")
-                    if review.get("status") == "completed":
-                        activity_data["status"] = "reviewed"
-                
-                # Get analysis results
-                analysis_snapshot = analysis_results_ref.where("submit_id", "==", submit_id).stream()
-                
-                total_errors = 0
-                total_warnings = 0
-                file_count = 0
-                for analysis_doc in analysis_snapshot:
-                    file_count += 1
-                    result = analysis_doc.to_dict()
-                    total_errors += len([e for e in result.get("errors", []) if e.get('type') == 'error'])
-                    total_warnings += len(result.get("warnings", []))
-                
-                activity_data["errors_count"] = total_errors
-                activity_data["warnings_count"] = total_warnings
-                activity_data["total_files"] = file_count
-            
-            activities.append(activity_data)
-            print(f"   • {activity_data['title']} - Status: {activity_data['status']}")
-        
-        return jsonify({
-            "success": True, 
-            "activities": activities, 
-            "student": student_data,
-            "classroom": classroom_info
-        })
-        
+            response = requests.get(api_url, headers=headers)
+            if response.status_code == 200:
+                repo_info = response.json()
+                return repo_info.get('default_branch', 'main')
     except Exception as e:
-        print(f"❌ Error in get_student_activities: {e}")
-        import traceback
-        traceback.print_exc()
-        return jsonify({"success": False, "error": str(e)}), 500
-
-@app.route('/api/health', methods=['GET'])
-def health_check():
-    """Health check endpoint"""
-    try:
-        # Test database connection
-        professors_ref.limit(1).get()
-        
-        return jsonify({
-            'status': 'healthy',
-            'database': 'firebase',
-            'collections_initialized': True,
-            'timestamp': datetime.utcnow().isoformat()
-        })
-    except Exception as e:
-        return jsonify({
-            'status': 'unhealthy', 
-            'error': str(e),
-            'timestamp': datetime.utcnow().isoformat()
-        }), 500
-
-@app.route('/api/submit-repo', methods=['POST'])
-def submit_repository():
-    """Submit a repository for analysis (professor submits for student)"""
-    try:
-        data = request.json
-        
-        student_id = data.get('student_id')
-        activity_id = data.get('activity_id')
-        repo_url = data.get('repo_url')
-        branch = data.get('branch', 'main')
-        professor_id = data.get('professor_id', 'prof_icabasug')
-        
-        if not all([student_id, activity_id, repo_url]):
-            return jsonify({'success': False, 'error': 'Missing required fields'}), 400
-        
-        # Verify student exists
-        student_doc = students_ref.document(student_id).get()
-        if not student_doc.exists:
-            return jsonify({'success': False, 'error': 'Student not found'}), 404
-        
-        student_data = student_doc.to_dict()
-        
-        # Get activity details
-        activity_doc = activitys_ref.document(f"{student_id}_{activity_id}").get()
-        if not activity_doc.exists:
-            return jsonify({'success': False, 'error': 'Activity not found'}), 404
-        
-        activity = activity_doc.to_dict()
-        
-        # Try to detect the correct branch before storing
-        detected_branch = branch
-        try:
-            # Quick check if the branch exists
-            import requests
-            parts = repo_url.rstrip('/').split('/')
-            if len(parts) >= 5:
-                user = parts[-2]
-                repo_name = parts[-1]
-                
-                # Try main branch first
-                api_url = f"https://api.github.com/repos/{user}/{repo_name}/branches"
-                headers = {}
-                if Config.GITHUB_TOKEN:
-                    headers['Authorization'] = f'token {Config.GITHUB_TOKEN}'
-                
-                response = requests.get(api_url, headers=headers)
-                if response.status_code == 200:
-                    branches = response.json()
-                    branch_names = [b['name'] for b in branches]
-                    
-                    if branch in branch_names:
-                        detected_branch = branch
-                    elif 'master' in branch_names:
-                        detected_branch = 'master'
-                    elif 'main' in branch_names:
-                        detected_branch = 'main'
-                    elif branch_names:
-                        detected_branch = branch_names[0]
-                    
-                    if detected_branch != branch:
-                        print(f"⚠️ Detected branch changed from {branch} to {detected_branch}")
-        except Exception as e:
-            print(f"⚠️ Could not detect branch: {e}")
-            # Continue with original branch
-        
-        submit_id = f"{student_id}_{activity_id}"
-        
-        # Check if submission exists in profSubmit
-        submit_doc = prof_submit_ref.document(submit_id).get()
-        
-        if submit_doc.exists:
-            print(f"📝 Using existing submission: {submit_id}")
-            # Delete old analysis results
-            analysis_snapshot = analysis_results_ref.where("submit_id", "==", submit_id).stream()
-            for doc in analysis_snapshot:
-                doc.reference.delete()
-            
-            # Reset submission with detected branch
-            prof_submit_ref.document(submit_id).set({
-                'StudentID': student_id,
-                'ActivityID': activity_id,
-                'ActivityTitle': activity['ActivityTitle'],
-                'classroomID': activity.get('classroomID', student_data.get('classroomID', 'CLASS101')),
-                'professorID': professor_id,
-                'repo_url': repo_url,
-                'branch': detected_branch,  # Use detected branch
-                'original_branch': branch,   # Store original for reference
-                'status': 'pending',
-                'completed_at': None,
-                'total_files': 0,
-                'analyzed_files': 0,
-                'errors_count': 0,
-                'warnings_count': 0,
-                'updated_at': firestore.SERVER_TIMESTAMP
-            }, merge=True)
-        else:
-            # Create new submission in profSubmit
-            submission_data = {
-                'StudentID': student_id,
-                'ActivityID': activity_id,
-                'ActivityTitle': activity['ActivityTitle'],
-                'classroomID': activity.get('classroomID', student_data.get('classroomID', 'CLASS101')),
-                'professorID': professor_id,
-                'repo_url': repo_url,
-                'branch': detected_branch,  # Use detected branch
-                'original_branch': branch,   # Store original for reference
-                'status': 'pending',
-                'created_at': firestore.SERVER_TIMESTAMP,
-                'completed_at': None,
-                'total_files': 0,
-                'analyzed_files': 0,
-                'errors_count': 0,
-                'warnings_count': 0
-            }
-            prof_submit_ref.document(submit_id).set(submission_data)
-            print(f"📝 Created new submission: {submit_id}")
-        
-        # Start analysis in background with detected branch
-        thread = threading.Thread(
-            target=analyze_repository_background,
-            args=(submit_id, repo_url, detected_branch, student_id, professor_id)
-        )
-        thread.daemon = True
-        thread.start()
-        
-        return jsonify({
-            'success': True,
-            'submit_id': submit_id,
-            'status': 'pending',
-            'branch_used': detected_branch
-        })
-        
-    except Exception as e:
-        print(f"❌ Error: {e}")
-        return jsonify({'success': False, 'error': str(e)}), 500
+        print(f"⚠️ Could not detect default branch: {e}")
     
-@app.route('/api/save-grade', methods=['POST'])
-def save_grade():
-    """Save grade for a submission"""
-    try:
-        data = request.json
-        submit_id = data.get('submit_id')
-        grade = data.get('grade')
-        professor_id = data.get('professor_id', 'prof_icabasug')
-        
-        if not submit_id:
-            return jsonify({'success': False, 'error': 'Submit ID required'}), 400
-        
-        if grade is None or not isinstance(grade, (int, float)) or grade < 0 or grade > 100:
-            return jsonify({'success': False, 'error': 'Grade must be a number between 0 and 100'}), 400
-        
-        # Check if submission exists
-        submit_doc = prof_submit_ref.document(submit_id).get()
-        if not submit_doc.exists:
-            return jsonify({'success': False, 'error': 'Submission not found'}), 404
-        
-        submission = submit_doc.to_dict()
-        
-        # Save grade in review
-        review_data = {
-            'StudentID': submission['StudentID'],
-            'ActivityID': submission['ActivityID'],
-            'classroomID': submission.get('classroomID', 'CLASS101'),
-            'professorID': professor_id,
-            'grade': grade,
-            'updated_at': firestore.SERVER_TIMESTAMP
-        }
-        
-        reviews_ref.document(submit_id).set(review_data, merge=True)
-        print(f"✅ Saved grade for submission {submit_id}: {grade}")
-        
-        return jsonify({
-            'success': True,
-            'message': f'Grade {grade} saved successfully'
-        })
-        
-    except Exception as e:
-        print(f"❌ Error saving grade: {e}")
-        return jsonify({'success': False, 'error': str(e)}), 500
+    return 'main'
 
-@app.route('/api/analysis/<submit_id>', methods=['GET'])
-def get_analysis(submit_id):
-    """Get analysis results for a submission"""
-    try:
-        submit_doc = prof_submit_ref.document(submit_id).get()
-        if not submit_doc.exists:
-            return jsonify({'success': False, 'error': 'Submission not found'}), 404
-        
-        submission = submit_doc.to_dict()
-        submission['_id'] = submit_id
-        
-        # Get all analysis results
-        results = []
-        analysis_snapshot = analysis_results_ref.where("submit_id", "==", submit_id).stream()
-        for doc in analysis_snapshot:
-            result = doc.to_dict()
-            result['_id'] = doc.id
-            results.append(result)
-        
-        # Get review if exists
-        review_doc = reviews_ref.document(submit_id).get()
-        review = review_doc.to_dict() if review_doc.exists else None
-        
-        return jsonify({
-            'success': True,
-            'submission': submission,
-            'files': results,
-            'review': review
-        })
-        
-    except Exception as e:
-        print(f"❌ Error: {e}")
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-@app.route('/api/files/<submit_id>', methods=['GET'])
-def get_files(submit_id):
-    """Get list of ALL analyzed files with content"""
-    try:
-        files = []
-        analysis_snapshot = analysis_results_ref.where("submit_id", "==", submit_id).stream()
-        
-        for doc in analysis_snapshot:
-            file_data = doc.to_dict()
-            file_data['_id'] = doc.id
-            files.append(file_data)
-        
-        files.sort(key=lambda x: x.get('file_path', ''))
-        
-        print(f"📤 Returning {len(files)} files for submission {submit_id}")
-        
-        return jsonify({
-            'success': True,
-            'files': files
-        })
-        
-    except Exception as e:
-        print(f"❌ Error: {e}")
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-@app.route('/api/save-feedback', methods=['POST'])
-def save_feedback():
-    """Save feedback for a submission"""
-    try:
-        data = request.json
-        
-        submit_id = data.get('submit_id')
-        reviewer_id = data.get('reviewer_id', 'prof_icabasug')
-        feedback = data.get('feedback', '')
-        
-        if not submit_id:
-            return jsonify({'success': False, 'error': 'Submit ID required'}), 400
-        
-        # Check if submission exists
-        submit_doc = prof_submit_ref.document(submit_id).get()
-        if not submit_doc.exists:
-            return jsonify({'success': False, 'error': 'Submission not found'}), 404
-        
-        submission = submit_doc.to_dict()
-        
-        # Save feedback in review
-        review_data = {
-            'StudentID': submission['StudentID'],
-            'ActivityID': submission['ActivityID'],
-            'classroomID': submission.get('classroomID', 'CLASS101'),
-            'professorID': reviewer_id,
-            'feedback': feedback,
-            'status': 'completed',
-            'completed_at': firestore.SERVER_TIMESTAMP
-        }
-        
-        reviews_ref.document(submit_id).set(review_data, merge=True)
-        print(f"✅ Saved feedback for submission {submit_id}")
-        
-        # Update submission status
-        prof_submit_ref.document(submit_id).update({
-            'status': 'reviewed',
-            'reviewed_at': firestore.SERVER_TIMESTAMP
-        })
-        
-        return jsonify({
-            'success': True,
-            'message': 'Feedback saved successfully'
-        })
-        
-    except Exception as e:
-        print(f"❌ Error: {e}")
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-def analyze_repository_background(submit_id, repo_url, branch, student_id, professor_id):
+def analyze_repository_background(analysis_id, repo_url, branch):
     """Background task for repository analysis"""
     temp_dir = None
     try:
         temp_dir = tempfile.mkdtemp()
-        print(f"📦 Attempting to clone from {repo_url} to {temp_dir}")
+        print(f"📦 Cloning {repo_url} to {temp_dir}")
         
-        # Try multiple branches if the specified branch fails
+        # Update status to cloning
+        analysis_storage[analysis_id]['status'] = 'cloning'
+        
+        # Try multiple branches
         branches_to_try = [branch, 'main', 'master']
         cloned_successfully = False
-        repo = None
         used_branch = None
         
         for try_branch in branches_to_try:
@@ -659,11 +188,10 @@ def analyze_repository_background(submit_id, repo_url, branch, student_id, profe
                 repo = Repo.clone_from(repo_url, temp_dir, branch=try_branch, depth=1)
                 used_branch = try_branch
                 cloned_successfully = True
-                print(f"   ✅ Successfully cloned using branch: {try_branch}")
+                print(f"   ✅ Cloned using branch: {try_branch}")
                 break
             except Exception as clone_error:
                 print(f"   ❌ Failed with branch {try_branch}: {clone_error}")
-                # Clean up temp directory for next attempt
                 if temp_dir and os.path.exists(temp_dir):
                     shutil.rmtree(temp_dir, ignore_errors=True)
                     temp_dir = tempfile.mkdtemp()
@@ -672,18 +200,13 @@ def analyze_repository_background(submit_id, repo_url, branch, student_id, profe
         if not cloned_successfully:
             raise Exception(f"Failed to clone repository. Tried branches: {branches_to_try}")
         
-        latest_commit = repo.head.commit
-        print(f"   📍 Latest commit: {latest_commit.hexsha[:8]} - {latest_commit.message.strip()}")
+        # Update status to analyzing
+        analysis_storage[analysis_id]['status'] = 'analyzing'
+        analysis_storage[analysis_id]['branch_used'] = used_branch
         
-        # Update submission with the actual branch used
-        prof_submit_ref.document(submit_id).update({
-            'branch_used': used_branch,  # Store which branch was actually used
-            'last_commit': latest_commit.hexsha,
-            'last_commit_message': latest_commit.message.strip(),
-            'last_commit_date': datetime.fromtimestamp(latest_commit.committed_date)
-        })
-        # Find ALL files
-        all_files = []
+        # Find C/C++ files
+        cpp_files = []
+        extensions = ['.c', '.cpp', '.cc', '.cxx', '.c++', '.h', '.hpp']
         
         for root, dirs, files in os.walk(temp_dir):
             dirs[:] = [d for d in dirs if not d.startswith('.') and d != '.git' and d != '__pycache__']
@@ -691,57 +214,33 @@ def analyze_repository_background(submit_id, repo_url, branch, student_id, profe
             for file in files:
                 file_path = os.path.join(root, file)
                 rel_path = os.path.relpath(file_path, temp_dir)
-                
-                file_stat = os.stat(file_path)
-                mod_time = datetime.fromtimestamp(file_stat.st_mtime)
-                
-                language = 'unknown'
                 ext = os.path.splitext(file)[1].lower()
                 
-                if ext in ['.c']:
-                    language = 'c'
-                elif ext in ['.cpp', '.cc', '.cxx']:
-                    language = 'cpp'
-                elif ext in ['.h', '.hpp']:
-                    language = 'header'
-                elif ext in ['.py']:
-                    language = 'python'
-                elif ext in ['.js']:
-                    language = 'javascript'
-                elif ext in ['.html', '.htm']:
-                    language = 'html'
-                elif ext in ['.css']:
-                    language = 'css'
-                elif ext in ['.md']:
-                    language = 'markdown'
-                elif ext in ['.txt']:
-                    language = 'text'
-                elif ext in ['.json']:
-                    language = 'json'
-                
-                all_files.append((file_path, rel_path, language, file, mod_time))
+                if ext in extensions:
+                    language = 'c' if ext == '.c' else 'cpp'
+                    cpp_files.append((file_path, rel_path, language, file))
         
-        print(f"🔍 Found {len(all_files)} total files")
+        print(f"🔍 Found {len(cpp_files)} C/C++ files")
         
-        # Update submission
-        prof_submit_ref.document(submit_id).update({
-            'total_files': len(all_files),
-            'status': 'analyzing',
-            'last_commit': latest_commit.hexsha,
-            'last_commit_message': latest_commit.message.strip(),
-            'last_commit_date': datetime.fromtimestamp(latest_commit.committed_date)
-        })
+        if len(cpp_files) == 0:
+            analysis_storage[analysis_id]['status'] = 'completed'
+            analysis_storage[analysis_id]['summary'] = {
+                'total_files': 0,
+                'errors_count': 0,
+                'warnings_count': 0,
+                'branch_used': used_branch
+            }
+            analysis_storage[analysis_id]['files'] = []
+            return
         
         total_errors = 0
         total_warnings = 0
-        processed_count = 0
+        analyzed_files = []
         
-        for file_path, rel_path, language, file_name, mod_time in all_files:
+        for file_path, rel_path, language, file_name in cpp_files:
             try:
                 # Read file content
                 content = ""
-                file_size = os.path.getsize(file_path)
-                
                 try:
                     encodings = ['utf-8', 'latin-1', 'cp1252', 'iso-8859-1', 'ascii']
                     for encoding in encodings:
@@ -758,40 +257,23 @@ def analyze_repository_background(submit_id, repo_url, branch, student_id, profe
                     content = f"// Error reading file: {str(e)}"
                 
                 # Analyze file
-                errors, warnings = analyze_file(file_path, language, content)
+                errors, warnings = analyze_file(file_path, language)
                 
-                # Store in Analysis_results collection
-                doc_id = f"{submit_id}_{rel_path.replace('/', '_')}"
-                result_data = {
-                    'submit_id': submit_id,
-                    'StudentID': student_id,
-                    'professorID': professor_id,
+                file_result = {
                     'file_path': rel_path.replace('\\', '/'),
                     'file_name': file_name,
                     'language': language,
-                    'status': 'analyzed',
+                    'code': content,
                     'errors': errors,
                     'warnings': warnings,
-                    'content': content,
-                    'analyzed_at': firestore.SERVER_TIMESTAMP,
-                    'passed': len(errors) == 0,
-                    'file_size': file_size,
-                    'file_modified': mod_time
+                    'errors_count': len(errors),
+                    'warnings_count': len(warnings)
                 }
                 
-                analysis_results_ref.document(doc_id).set(result_data)
+                analyzed_files.append(file_result)
                 
-                total_errors += len([e for e in errors if e.get('type') == 'error'])
+                total_errors += len(errors)
                 total_warnings += len(warnings)
-                processed_count += 1
-                
-                if processed_count % 5 == 0:
-                    prof_submit_ref.document(submit_id).update({
-                        'analyzed_files': processed_count,
-                        'errors_count': total_errors,
-                        'warnings_count': total_warnings
-                    })
-                    print(f"📊 Progress: {processed_count}/{len(all_files)} files")
                 
                 if errors:
                     status_icon = "❌"
@@ -800,87 +282,143 @@ def analyze_repository_background(submit_id, repo_url, branch, student_id, profe
                 else:
                     status_icon = "✅"
                     
-                print(f"{status_icon} {rel_path}")
+                print(f"{status_icon} {rel_path} (Errors: {len(errors)}, Warnings: {len(warnings)})")
                 
             except Exception as e:
                 print(f"❌ Error processing {rel_path}: {e}")
-                doc_id = f"{submit_id}_{rel_path.replace('/', '_')}"
-                result_data = {
-                    'submit_id': submit_id,
-                    'StudentID': student_id,
-                    'professorID': professor_id,
+                file_result = {
                     'file_path': rel_path.replace('\\', '/'),
                     'file_name': file_name,
                     'language': language,
-                    'status': 'failed',
+                    'code': f"// Error processing file: {str(e)}",
                     'errors': [{'line': 0, 'message': f'Processing error: {str(e)}', 'type': 'error'}],
                     'warnings': [],
-                    'content': f"// Error processing file: {str(e)}",
-                    'analyzed_at': firestore.SERVER_TIMESTAMP,
-                    'passed': False,
-                    'file_size': 0
+                    'errors_count': 1,
+                    'warnings_count': 0
                 }
-                analysis_results_ref.document(doc_id).set(result_data)
+                analyzed_files.append(file_result)
                 total_errors += 1
-                processed_count += 1
         
-        # Final update
-        prof_submit_ref.document(submit_id).update({
-            'status': 'completed',
-            'completed_at': firestore.SERVER_TIMESTAMP,
-            'analyzed_files': processed_count,
+        # Store results
+        analysis_storage[analysis_id]['status'] = 'completed'
+        analysis_storage[analysis_id]['summary'] = {
+            'total_files': len(cpp_files),
             'errors_count': total_errors,
-            'warnings_count': total_warnings
-        })
+            'warnings_count': total_warnings,
+            'branch_used': used_branch
+        }
+        analysis_storage[analysis_id]['files'] = analyzed_files
         
-        print(f"\n✅ Analysis complete for {submit_id}")
-        print(f"   Total files: {len(all_files)}")
+        print(f"\n✅ Analysis complete for {analysis_id}")
+        print(f"   Total files: {len(cpp_files)}")
         print(f"   Total errors: {total_errors}")
         print(f"   Total warnings: {total_warnings}")
         
     except Exception as e:
         print(f"❌ Background analysis failed: {e}")
-        prof_submit_ref.document(submit_id).update({
-            'status': 'failed',
-            'error': str(e)
-        })
+        analysis_storage[analysis_id]['status'] = 'error'
+        analysis_storage[analysis_id]['error'] = str(e)
     finally:
         if temp_dir and os.path.exists(temp_dir):
             shutil.rmtree(temp_dir, ignore_errors=True)
             print(f"🧹 Cleaned up temporary directory")
 
+@app.route('/api/analyze', methods=['POST'])
+def analyze_repository():
+    """Analyze a GitHub repository"""
+    try:
+        data = request.json
+        repo_url = data.get('repo_url')
+        
+        if not repo_url:
+            return jsonify({'success': False, 'error': 'Repository URL required'}), 400
+        
+        # Generate unique analysis ID
+        analysis_id = str(uuid.uuid4())
+        
+        # Detect branch
+        branch = detect_branch(repo_url)
+        
+        # Initialize storage
+        analysis_storage[analysis_id] = {
+            'id': analysis_id,
+            'repo_url': repo_url,
+            'branch': branch,
+            'status': 'pending',
+            'created_at': datetime.utcnow().isoformat(),
+            'summary': None,
+            'files': []
+        }
+        
+        # Start analysis in background
+        thread = threading.Thread(
+            target=analyze_repository_background,
+            args=(analysis_id, repo_url, branch)
+        )
+        thread.daemon = True
+        thread.start()
+        
+        return jsonify({
+            'success': True,
+            'analysis_id': analysis_id,
+            'branch_used': branch,
+            'message': 'Analysis started'
+        })
+        
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/analysis/<analysis_id>', methods=['GET'])
+def get_analysis(analysis_id):
+    """Get analysis results"""
+    try:
+        if analysis_id not in analysis_storage:
+            return jsonify({'success': False, 'error': 'Analysis not found'}), 404
+        
+        analysis = analysis_storage[analysis_id]
+        
+        response = {
+            'success': True,
+            'analysis_id': analysis_id,
+            'status': analysis['status'],
+            'repo_url': analysis['repo_url']
+        }
+        
+        if analysis['status'] == 'completed':
+            response['summary'] = analysis['summary']
+            response['files'] = analysis['files']
+        elif analysis['status'] == 'error':
+            response['error'] = analysis.get('error', 'Unknown error')
+        
+        return jsonify(response)
+        
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/health', methods=['GET'])
+def health_check():
+    """Health check endpoint"""
+    return jsonify({
+        'status': 'healthy',
+        'timestamp': datetime.utcnow().isoformat(),
+        'service': 'Code Analyzer API'
+    })
+
 @app.route('/', methods=['GET'])
 def home():
     return jsonify({
-        'name': 'CodeTracker API',
-        'version': '2.0.0',
+        'name': 'Code Analyzer API',
+        'version': '1.0.0',
         'status': 'running',
-        'database': 'firebase',
-        'collections': [
-            'Classrooms',
-            'professors',
-            'Students',
-            'Activitys',
-            'profSubmit',
-            'reviews',
-            'Analysis_results'
-        ],
-        'current_setup': {
-            'classrooms': 1,
-            'students': 2,
-            'activities': 4
-        },
         'endpoints': [
-            '/api/health',
-            '/api/classroom/<classroom_id>',
-            '/api/students/<professor_id>',
-            '/api/activities/<student_id>',
-            '/api/submit-repo',
-            '/api/analysis/<submit_id>',
-            '/api/files/<submit_id>',
-            '/api/save-grade',
-            '/api/save-feedback'
-        ]
+            'POST /api/analyze - Analyze a GitHub repository',
+            'GET /api/analysis/<analysis_id> - Get analysis results',
+            'GET /api/health - Health check'
+        ],
+        'supported_languages': ['C', 'C++'],
+        'supported_extensions': ['.c', '.cpp', '.cc', '.cxx', '.c++', '.h', '.hpp']
     })
 
 def find_free_port():
@@ -888,6 +426,22 @@ def find_free_port():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(('127.0.0.1', 0))
         return s.getsockname()[1]
+
+# Cleanup old analyses periodically (optional)
+def cleanup_old_analyses():
+    """Remove analyses older than 1 hour"""
+    now = datetime.utcnow()
+    to_delete = []
+    for analysis_id, analysis in analysis_storage.items():
+        created_at = datetime.fromisoformat(analysis['created_at'])
+        if (now - created_at).total_seconds() > 3600:  # 1 hour
+            to_delete.append(analysis_id)
+    
+    for analysis_id in to_delete:
+        del analysis_storage[analysis_id]
+    
+    if to_delete:
+        print(f"🧹 Cleaned up {len(to_delete)} old analyses")
 
 if __name__ == '__main__':
     # Get port from environment variable (Railway sets this)
@@ -916,20 +470,26 @@ if __name__ == '__main__':
             print(f"   ℹ️ Using automatically assigned port: {selected_port}")
         
         print("=" * 60)
-        print("🚀 CodeTracker Backend Server (Firebase)")
+        print("🚀 Code Analyzer Backend Server")
         print("=" * 60)
-        print(f"📡 Database: Firebase Firestore")
         print(f"🌐 Server running on: http://127.0.0.1:{selected_port}")
+        print(f"📡 API Endpoints:")
+        print(f"   POST /api/analyze - Analyze repository")
+        print(f"   GET /api/analysis/<id> - Get results")
+        print(f"   GET /api/health - Health check")
         print("=" * 60)
         
         app.run(debug=True, port=selected_port, host='127.0.0.1')
     else:
         # Production on Railway
         print("=" * 60)
-        print("🚀 CodeTracker Backend Server (Production)")
+        print("🚀 Code Analyzer Backend Server (Production)")
         print("=" * 60)
-        print(f"📡 Database: Firebase Firestore")
         print(f"🌐 Server running on port: {port}")
+        print(f"📡 API Endpoints:")
+        print(f"   POST /api/analyze - Analyze repository")
+        print(f"   GET /api/analysis/<id> - Get results")
+        print(f"   GET /api/health - Health check")
         print("=" * 60)
         
         app.run(debug=False, port=port, host='0.0.0.0')
