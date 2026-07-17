@@ -29,7 +29,8 @@ CORS(app, origins=[
     'http://localhost:8000',
     'http://127.0.0.1:8000',
     'https://analyzec1-production.up.railway.app',
-    'https://cd-tracker-nine.vercel.app'
+    'https://cd-tracker-nine.vercel.app',
+    'http://localhost:8080/api'
 ], supports_credentials=True, allow_headers=['Content-Type', 'Authorization'])
 
 # In-memory storage for analysis results (since no Firebase)
