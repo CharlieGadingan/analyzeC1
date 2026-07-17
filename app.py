@@ -14,8 +14,7 @@ from flask_cors import CORS
 from git import Repo
 
 from language_checks import (
-    analyze_source_file,
-    detect_language_from_content,
+    analyze_file as analyze_source_file,
     get_supported_extensions,
     get_supported_language_labels,
     read_text_file,
@@ -33,17 +32,18 @@ CORS(app, origins=[
     'http://127.0.0.1:3000',
     'http://localhost:8000',
     'http://127.0.0.1:8000',
-    'https://analyzec1-production.up.railway.app',
+    'http://localhost:8080',
+    'http://127.0.0.1:8080',
     'https://cd-tracker-nine.vercel.app',
-    'http://localhost:8080/api'
+    'https://analyzec1-production.up.railway.app'
 ], supports_credentials=True, allow_headers=['Content-Type', 'Authorization'])
 
 analysis_storage = {}
 
 
-def analyze_file(file_path, language):
+def analyze_file(file_path, file_name):
     """Analyze a single supported file."""
-    return analyze_source_file(file_path, language)
+    return analyze_source_file(file_path, file_name=file_name)
 
 
 def detect_branch(repo_url):
@@ -103,21 +103,24 @@ def analyze_repository_background(analysis_id, repo_url, branch):
         analysis_storage[analysis_id]['branch_used'] = used_branch
 
         source_files = []
+        supported_extensions = set(get_supported_extensions())
         for root, dirs, files in os.walk(temp_dir):
             dirs[:] = [d for d in dirs if not d.startswith('.') and d != '.git' and d != '__pycache__']
 
             for file_name in files:
                 file_path = os.path.join(root, file_name)
                 rel_path = os.path.relpath(file_path, temp_dir)
+                extension = os.path.splitext(file_name)[1].lower()
+
+                if extension not in supported_extensions:
+                    continue
 
                 try:
                     content = read_text_file(file_path)
                 except Exception:
                     content = ''
 
-                language = detect_language_from_content(content, file_name=file_name)
-                if language:
-                    source_files.append((file_path, rel_path, language, file_name, content))
+                source_files.append((file_path, rel_path, file_name, content))
 
         print(f"Found {len(source_files)} supported source files")
 
@@ -136,14 +139,14 @@ def analyze_repository_background(analysis_id, repo_url, branch):
         total_warnings = 0
         analyzed_files = []
 
-        for file_path, rel_path, language, file_name, content in source_files:
+        for file_path, rel_path, file_name, content in source_files:
             try:
-                analysis_result = analyze_file(file_path, language)
+                analysis_result = analyze_file(file_path, file_name)
 
                 file_result = {
                     'file_path': rel_path.replace('\\', '/'),
                     'file_name': file_name,
-                    'language': language,
+                    'language': analysis_result.get('detected_language'),
                     'code': content,
                     'analysis_signal': analysis_result['analysis_signal'],
                     'errors': analysis_result['errors'],
@@ -164,7 +167,7 @@ def analyze_repository_background(analysis_id, repo_url, branch):
                 file_result = {
                     'file_path': rel_path.replace('\\', '/'),
                     'file_name': file_name,
-                    'language': language,
+                    'language': None,
                     'code': content or f"// Error processing file: {exc}",
                     'analysis_signal': None,
                     'errors': [{'line': 0, 'message': f'Processing error: {exc}', 'type': 'error'}],

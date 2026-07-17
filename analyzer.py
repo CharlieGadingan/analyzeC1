@@ -1,12 +1,13 @@
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
-from language_checks import analyze_source_file, detect_language_from_content, read_text_file
+from language_checks import analyze_file as analyze_source_file, get_supported_extensions
 
 class CodeAnalyzer:
     def find_analyzable_files(self, repo_path):
         """Find all supported source files in repository"""
         supported_files = []
+        supported_extensions = set(get_supported_extensions())
         
         for root, dirs, dir_files in os.walk(repo_path):
             # Skip hidden directories and common build directories
@@ -15,20 +16,15 @@ class CodeAnalyzer:
             for file in dir_files:
                 file_path = os.path.join(root, file)
                 rel_path = os.path.relpath(file_path, repo_path)
-                try:
-                    content = read_text_file(file_path)
-                except Exception:
-                    content = ''
-
-                language = detect_language_from_content(content, file_name=file)
-                if language:
-                    supported_files.append((file_path, rel_path, language))
+                extension = os.path.splitext(file)[1].lower()
+                if extension in supported_extensions:
+                    supported_files.append((file_path, rel_path, file))
         
         return supported_files
 
-    def analyze_file(self, file_path, language):
+    def analyze_file(self, file_path, file_name):
         """Analyze a single supported file"""
-        return analyze_source_file(file_path, language)
+        return analyze_source_file(file_path, file_name=file_name)
 
     def analyze_repository(self, repo_path, submission_id, db, max_workers=4):
         """Analyze all supported files in repository"""
@@ -50,23 +46,24 @@ class CodeAnalyzer:
         # Analyze files in parallel
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_file = {
-                executor.submit(self.analyze_file, file_path, language): (file_path, rel_path, language)
-                for file_path, rel_path, language in files
+                executor.submit(self.analyze_file, file_path, file_name): (file_path, rel_path, file_name)
+                for file_path, rel_path, file_name in files
             }
             
             analyzed_count = 0
             for future in as_completed(future_to_file):
-                file_path, rel_path, language = future_to_file[future]
+                file_path, rel_path, file_name = future_to_file[future]
                 
                 try:
                     analysis_result = future.result()
+                    detected_language = analysis_result.get('detected_language')
                     
                     # Store in database
                     result_doc = {
                         'submission_id': submission_id,
                         'file_path': rel_path,
                         'file_name': os.path.basename(file_path),
-                        'language': language,
+                        'language': detected_language,
                         'analysis_signal': analysis_result['analysis_signal'],
                         'status': 'analyzed',
                         'errors': analysis_result['errors'],
