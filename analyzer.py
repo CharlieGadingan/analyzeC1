@@ -1,134 +1,38 @@
-import subprocess
 import os
-import tempfile
-from config import Config
-import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+from language_checks import analyze_source_file, detect_language_from_content, read_text_file
 
 class CodeAnalyzer:
-    def __init__(self):
-        self.compile_timeout = Config.COMPILE_TIMEOUT
+    def find_analyzable_files(self, repo_path):
+        """Find all supported source files in repository"""
+        supported_files = []
         
-    def find_c_cpp_files(self, repo_path):
-        """Find all C and C++ files in repository"""
-        c_files = []
-        cpp_files = []
-        
-        for root, dirs, files in os.walk(repo_path):
+        for root, dirs, dir_files in os.walk(repo_path):
             # Skip hidden directories and common build directories
             dirs[:] = [d for d in dirs if not d.startswith('.') and d not in ['build', 'dist', 'node_modules']]
             
-            for file in files:
+            for file in dir_files:
                 file_path = os.path.join(root, file)
                 rel_path = os.path.relpath(file_path, repo_path)
-                
-                if file.endswith('.c'):
-                    c_files.append((file_path, rel_path, 'c'))
-                elif any(file.endswith(ext) for ext in ['.cpp', '.cc', '.cxx']):
-                    cpp_files.append((file_path, rel_path, 'cpp'))
+                try:
+                    content = read_text_file(file_path)
+                except Exception:
+                    content = ''
+
+                language = detect_language_from_content(content, file_name=file)
+                if language:
+                    supported_files.append((file_path, rel_path, language))
         
-        return c_files + cpp_files
+        return supported_files
 
     def analyze_file(self, file_path, language):
-        """Analyze a single C/C++ file"""
-        result = {
-            'errors': [],
-            'warnings': [],
-            'compile_output': '',
-            'passed': True
-        }
-        
-        try:
-            # Create temp file for output
-            with tempfile.NamedTemporaryFile(suffix='.out', delete=False) as tmp:
-                output_file = tmp.name
-            
-            # Compile command based on language
-            if language == 'c':
-                cmd = ['gcc', '-fsyntax-only', '-Wall', '-Wextra', '-std=c11', file_path]
-            else:  # cpp
-                cmd = ['g++', '-fsyntax-only', '-Wall', '-Wextra', '-std=c++14', file_path]
-            
-            # Run compilation
-            process = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=self.compile_timeout
-            )
-            
-            # Parse output
-            stderr_lines = process.stderr.split('\n')
-            
-            for line in stderr_lines:
-                if not line.strip():
-                    continue
-                    
-                # Parse GCC/Clang error format
-                # filename:line:column: error/warning: message
-                parts = line.split(':', 3)
-                if len(parts) >= 4:
-                    try:
-                        line_num = int(parts[1])
-                        msg_type = parts[2].strip()
-                        message = parts[3].strip()
-                        
-                        if 'error' in msg_type.lower():
-                            result['errors'].append({
-                                'line': line_num,
-                                'message': message,
-                                'type': 'error'
-                            })
-                            result['passed'] = False
-                        elif 'warning' in msg_type.lower():
-                            result['warnings'].append({
-                                'line': line_num,
-                                'message': message,
-                                'type': 'warning'
-                            })
-                    except (ValueError, IndexError):
-                        # Line number parsing failed, include as general error
-                        if 'error' in line.lower():
-                            result['errors'].append({
-                                'line': 0,
-                                'message': line,
-                                'type': 'error'
-                            })
-                            result['passed'] = False
-                        elif 'warning' in line.lower():
-                            result['warnings'].append({
-                                'line': 0,
-                                'message': line,
-                                'type': 'warning'
-                            })
-            
-            result['compile_output'] = process.stderr
-            
-            # Clean up
-            if os.path.exists(output_file):
-                os.unlink(output_file)
-                
-        except subprocess.TimeoutExpired:
-            result['errors'].append({
-                'line': 0,
-                'message': f'Compilation timeout after {self.compile_timeout} seconds',
-                'type': 'error'
-            })
-            result['passed'] = False
-        except Exception as e:
-            result['errors'].append({
-                'line': 0,
-                'message': f'Analysis error: {str(e)}',
-                'type': 'error'
-            })
-            result['passed'] = False
-        
-        return result
+        """Analyze a single supported file"""
+        return analyze_source_file(file_path, language)
 
     def analyze_repository(self, repo_path, submission_id, db, max_workers=4):
-        """Analyze all C/C++ files in repository"""
-        files = self.find_c_cpp_files(repo_path)
+        """Analyze all supported files in repository"""
+        files = self.find_analyzable_files(repo_path)
         
         if not files:
             return {'total_files': 0, 'analyzed_files': 0}
@@ -163,6 +67,7 @@ class CodeAnalyzer:
                         'file_path': rel_path,
                         'file_name': os.path.basename(file_path),
                         'language': language,
+                        'analysis_signal': analysis_result['analysis_signal'],
                         'status': 'analyzed',
                         'errors': analysis_result['errors'],
                         'warnings': analysis_result['warnings'],
