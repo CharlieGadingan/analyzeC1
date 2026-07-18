@@ -14,6 +14,7 @@ import requests
 from language_checks import (
     analyze_source_file,
     detect_language_from_content,
+    detect_language_from_extension,
     get_supported_extensions,
     get_supported_language_labels,
     read_text_file,
@@ -43,6 +44,24 @@ analysis_storage = {}
 def analyze_file(file_path, language):
     """Analyze a single supported file"""
     return analyze_source_file(file_path, language)
+
+def format_analysis_result(file_path, file_name, language, content):
+    analysis_result = analyze_file(file_path, language)
+    errors = analysis_result.get('errors', [])
+    warnings = analysis_result.get('warnings', [])
+
+    return {
+        'file_name': file_name,
+        'language': analysis_result.get('detected_language') or language,
+        'code': content,
+        'errors': errors,
+        'warnings': warnings,
+        'errors_count': len(errors),
+        'warnings_count': len(warnings),
+        'analysis_signal': analysis_result.get('analysis_signal'),
+        'compile_output': analysis_result.get('compile_output', ''),
+        'passed': analysis_result.get('passed', len(errors) == 0)
+    }
 
 def detect_branch(repo_url):
     """Detect the default branch of a GitHub repository"""
@@ -142,33 +161,22 @@ def analyze_repository_background(analysis_id, repo_url, branch):
                 except Exception as e:
                     content = f"// Error reading file: {str(e)}"
                 
-                # Analyze file
-                errors, warnings = analyze_file(file_path, language)
-                
-                file_result = {
-                    'file_path': rel_path.replace('\\', '/'),
-                    'file_name': file_name,
-                    'language': language,
-                    'code': content,
-                    'errors': errors,
-                    'warnings': warnings,
-                    'errors_count': len(errors),
-                    'warnings_count': len(warnings)
-                }
+                file_result = format_analysis_result(file_path, file_name, language, content)
+                file_result['file_path'] = rel_path.replace('\\', '/')
                 
                 analyzed_files.append(file_result)
                 
-                total_errors += len(errors)
-                total_warnings += len(warnings)
+                total_errors += file_result['errors_count']
+                total_warnings += file_result['warnings_count']
                 
-                if errors:
+                if file_result['errors']:
                     status_icon = "❌"
-                elif warnings:
+                elif file_result['warnings']:
                     status_icon = "⚠️"
                 else:
                     status_icon = "✅"
                     
-                print(f"{status_icon} {rel_path} (Errors: {len(errors)}, Warnings: {len(warnings)})")
+                print(f"{status_icon} {rel_path} (Errors: {file_result['errors_count']}, Warnings: {file_result['warnings_count']})")
                 
             except Exception as e:
                 print(f"❌ Error processing {rel_path}: {e}")

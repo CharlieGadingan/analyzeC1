@@ -398,6 +398,20 @@ def _analyze_csharp(file_path):
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
+def _analyze_java(file_path):
+    temp_dir = tempfile.mkdtemp()
+
+    try:
+        command = ['javac', '-Xlint', '-d', temp_dir, file_path]
+        process = subprocess.run(command, capture_output=True, text=True, timeout=30)
+        output = process.stderr
+        errors, warnings = _parse_compiler_output(output)
+        return errors, warnings, output
+
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
 def analyze_file(file_path, file_name=None):
     result = {
         'errors': [],
@@ -430,10 +444,7 @@ def analyze_file(file_path, file_name=None):
             result['errors'], result['warnings'] = _parse_compiler_output(process.stderr)
         elif detected_language == 'java':
             result['analysis_signal'] = 'javac'
-            command = ['javac', '-Xlint', file_path]
-            process = subprocess.run(command, capture_output=True, text=True, timeout=30)
-            result['compile_output'] = process.stderr
-            result['errors'], result['warnings'] = _parse_compiler_output(process.stderr)
+            result['errors'], result['warnings'], result['compile_output'] = _analyze_java(file_path)
         elif detected_language == 'python':
             result['analysis_signal'] = 'python'
             command = [sys.executable, '-m', 'py_compile', file_path]
