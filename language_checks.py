@@ -4,7 +4,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from html.parser import HTMLParser
 
 
 SUPPORTED_LANGUAGES = {
@@ -24,18 +23,6 @@ SUPPORTED_LANGUAGES = {
         'name': 'Python',
         'extensions': ['.py'],
     },
-    'javascript': {
-        'name': 'JavaScript',
-        'extensions': ['.js', '.mjs', '.cjs'],
-    },
-    'html': {
-        'name': 'HTML',
-        'extensions': ['.html', '.htm'],
-    },
-    'css': {
-        'name': 'CSS',
-        'extensions': ['.css'],
-    },
     'csharp': {
         'name': 'C#',
         'extensions': ['.cs'],
@@ -43,25 +30,7 @@ SUPPORTED_LANGUAGES = {
 }
 
 
-VOID_HTML_TAGS = {
-    'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input',
-    'link', 'meta', 'param', 'source', 'track', 'wbr'
-}
-
-
 LANGUAGE_HINTS = {
-    'html': [
-        r'<!doctype\s+html',
-        r'<html\b',
-        r'<head\b',
-        r'<body\b',
-    ],
-    'css': [
-        r'^\s*@import\b',
-        r'^\s*@media\b',
-        r'^\s*[.#][\w-]+\s*\{',
-        r'^\s*[a-zA-Z][\w-]*\s*\{\s*$',
-    ],
     'python': [
         r'^\s*#!.*\bpython[0-9.]*\b',
         r'^\s*def\s+\w+\s*\(',
@@ -74,13 +43,6 @@ LANGUAGE_HINTS = {
         r'^\s*import\s+java\.',
         r'\bpublic\s+class\b',
         r'\bSystem\.out\.println\b',
-    ],
-    'javascript': [
-        r'^\s*#!.*\bnode\b',
-        r'\b(const|let|var)\s+\w+\s*=',
-        r'\bfunction\s+\w+\s*\(',
-        r'=>',
-        r'\bimport\s+.*\s+from\s+[\'"]',
     ],
     'csharp': [
         r'^\s*using\s+System\s*;',
@@ -246,111 +208,6 @@ def _parse_python_output(stderr_text):
     return errors, warnings
 
 
-def _parse_javascript_output(stderr_text):
-    errors = []
-    warnings = []
-
-    if not stderr_text.strip():
-        return errors, warnings
-
-    line_number = 0
-    message = stderr_text.strip().splitlines()[-1].strip()
-
-    first_line = next((line.strip() for line in stderr_text.splitlines() if line.strip()), '')
-    match = re.search(r':(\d+):(?:\d+)?:', first_line)
-    if match:
-        line_number = int(match.group(1))
-
-    for line in reversed([line.strip() for line in stderr_text.splitlines() if line.strip()]):
-        if 'SyntaxError:' in line or 'ReferenceError:' in line or 'TypeError:' in line:
-            message = line.split(':', 1)[1].strip() if ':' in line else line
-            break
-
-    _append_issue(errors, line_number, message, 'error')
-    return errors, warnings
-
-
-class _HtmlSyntaxChecker(HTMLParser):
-    def __init__(self):
-        super().__init__()
-        self.errors = []
-        self.stack = []
-
-    def handle_starttag(self, tag, attrs):
-        if tag not in VOID_HTML_TAGS:
-            self.stack.append((tag, self.getpos()[0]))
-
-    def handle_startendtag(self, tag, attrs):
-        return
-
-    def handle_endtag(self, tag):
-        if tag in VOID_HTML_TAGS:
-            return
-
-        for index in range(len(self.stack) - 1, -1, -1):
-            open_tag, line_number = self.stack[index]
-            if open_tag == tag:
-                del self.stack[index:]
-                return
-
-        _append_issue(self.errors, self.getpos()[0], f'Unexpected closing tag </{tag}>', 'error')
-
-    def close(self):
-        super().close()
-        for tag, line_number in reversed(self.stack):
-            _append_issue(self.errors, line_number, f'Unclosed tag <{tag}>', 'error')
-
-
-def analyze_html_content(content):
-    checker = _HtmlSyntaxChecker()
-    try:
-        checker.feed(content)
-        checker.close()
-    except Exception as exc:
-        _append_issue(checker.errors, 0, f'HTML parse error: {exc}', 'error')
-
-    return checker.errors, []
-
-
-def _strip_css_comments(content):
-    return re.sub(r'/\*.*?\*/', '', content, flags=re.DOTALL)
-
-
-def analyze_css_content(content):
-    errors = []
-    warnings = []
-    cleaned = _strip_css_comments(content)
-    brace_stack = []
-
-    for line_number, line in enumerate(cleaned.splitlines(), start=1):
-        in_string = None
-        escaped = False
-        for character in line:
-            if in_string:
-                if escaped:
-                    escaped = False
-                elif character == '\\':
-                    escaped = True
-                elif character == in_string:
-                    in_string = None
-                continue
-
-            if character in {'"', "'"}:
-                in_string = character
-            elif character == '{':
-                brace_stack.append(line_number)
-            elif character == '}':
-                if brace_stack:
-                    brace_stack.pop()
-                else:
-                    _append_issue(errors, line_number, 'Unexpected closing brace }', 'error')
-
-    for line_number in brace_stack:
-        _append_issue(errors, line_number, 'Unclosed block {', 'error')
-
-    return errors, warnings
-
-
 def _analyze_csharp(file_path):
     errors = []
     warnings = []
@@ -451,18 +308,6 @@ def analyze_file(file_path, file_name=None):
             process = subprocess.run(command, capture_output=True, text=True, timeout=30)
             result['compile_output'] = process.stderr
             result['errors'], result['warnings'] = _parse_python_output(process.stderr)
-        elif detected_language == 'javascript':
-            result['analysis_signal'] = 'node'
-            command = ['node', '--check', file_path]
-            process = subprocess.run(command, capture_output=True, text=True, timeout=30)
-            result['compile_output'] = process.stderr
-            result['errors'], result['warnings'] = _parse_javascript_output(process.stderr)
-        elif detected_language == 'html':
-            result['analysis_signal'] = 'html-parser'
-            result['errors'], result['warnings'] = analyze_html_content(content)
-        elif detected_language == 'css':
-            result['analysis_signal'] = 'css-parser'
-            result['errors'], result['warnings'] = analyze_css_content(content)
         elif detected_language == 'csharp':
             result['analysis_signal'] = 'dotnet'
             result['errors'], result['warnings'], result['compile_output'], _ = _analyze_csharp(file_path)
